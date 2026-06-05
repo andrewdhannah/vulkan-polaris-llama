@@ -1,0 +1,7 @@
+set(TARGET llama-server-mini)
+add_executable(${TARGET} server-mini.cpp)
+target_link_libraries(${TARGET} PRIVATE llama ${CMAKE_THREAD_LIBS_INIT})
+set_target_properties(${TARGET} PROPERTIES FOLDER examples)
+if (WIN32)
+    target_link_libraries(${TARGET} PRIVATE ws2_32)
+endif()
