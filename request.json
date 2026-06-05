@@ -1,0 +1,9 @@
+{
+  "model": "qwen2.5-moe",
+  "messages": [
+    {"role": "user", "content": "Hello"}
+  ],
+  "max_tokens": 32,
+  "temperature": 0.7,
+  "stream": false
+}
