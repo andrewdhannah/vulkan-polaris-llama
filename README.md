@@ -33,8 +33,13 @@ backend fails with `VK_ERROR_DEVICE_LOST` during `vkCreateDevice`.
 
 **On Windows, double-click:** `start_server.bat`
 
-This starts the server with the Qwen 1.5B model on port 8080.
+This starts the `llama-server-mini` with the current active model on port 8080.
 Wait ~12s for the model to load, then access it from any device on your network.
+
+### Available Models
+The project is configured to support multiple models depending on VRAM availability:
+- **Qwen 2.5 MoE (2x1.5B)**: Optimized for agentic work with partial GPU offload.
+- **Qwen 2.5 Coder 1.5B**: High-speed coding assistant.
 
 ### From another machine
 
