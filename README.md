@@ -1,10 +1,23 @@
-# Vulkan Polaris Fix — llama.cpp on AMD RX 400/500 (gfx803)
+# Vulkan Polaris Fix — Known-Good llama.cpp Enablement for AMD RX 400/500 (gfx803)
 
-> Making llama.cpp work on AMD Polaris GPUs via Vulkan on Windows, with a built-in HTTP server for remote access.
+> A compatibility patch and rebuild record for llama.cpp Vulkan inference on
+> AMD Polaris GPUs, with a built-in HTTP server for LAN access.
+
+**Proven on:** [Big Pickle](HARDWARE-RECEIPT.md) — a Windows 10 machine with
+an AMD Radeon RX 570 4 GB and an Intel i5-3570K.
+
+## Status
+
+| Scope | Status |
+|-------|--------|
+| **Confirmed** | RX 570 (Polaris 20) / Windows 10 / Vulkan SDK 1.3.296.0 |
+| **Expected** | RX 470/480/570/580/590 class Polaris GPUs on Windows |
+| **Untested** | Linux RADV, AMD RDNA (RX 5000+), NVIDIA, Intel |
 
 ## The Problem
 
-On AMD Polaris-family GPUs (RX 400/500 series, gfx803), llama.cpp's Vulkan backend fails with `VK_ERROR_DEVICE_LOST` during `vkCreateDevice`.
+On AMD Polaris-family GPUs (RX 400/500 series, gfx803), llama.cpp's Vulkan
+backend fails with `VK_ERROR_DEVICE_LOST` during `vkCreateDevice`.
 
 **Three interacting root causes were identified:**
 
@@ -16,7 +29,7 @@ On AMD Polaris-family GPUs (RX 400/500 series, gfx803), llama.cpp's Vulkan backe
 
 [Full root cause analysis →](docs/root-cause.md)
 
-## Quick Start
+## Quick Start (on Big Pickle or equivalent)
 
 **On Windows, double-click:** `start_server.bat`
 
@@ -53,10 +66,10 @@ Radeon RX 570 (4GB) with **Qwen 2.5 Coder 1.5B Q8_0**:
 | `patches/ggml-vulkan-polaris-fix.patch` | The actual diff to apply to llama.cpp |
 | `server/server-mini.cpp` | Lightweight C++ HTTP server embedding llama.cpp |
 | `server/CMakeLists.txt` | Build integration for the server |
-| `start_server.bat` | One-click launcher for Windows |
+| `start_server.bat` | One-click launcher for Windows (edit paths for your setup) |
 | `tests/` | Standalone diagnostic programs that isolated each root cause |
 | `docs/root-cause.md` | Detailed root cause analysis with evidence |
-| `docs/server-setup.md` | Server usage and build instructions |
+| `docs/server-setup.md` | Server usage, build and troubleshooting guide |
 
 ## Applying the Fix
 
@@ -66,6 +79,8 @@ git apply /path/to/vulkan-polaris-llama/patches/ggml-vulkan-polaris-fix.patch
 ```
 
 Then build normally with `-DGGML_VULKAN=ON`.
+
+See [REBUILD-STEPS.md](REBUILD-STEPS.md) for the complete Windows procedure.
 
 ## Reproducing
 
@@ -77,6 +92,14 @@ Tested on:
 - **CPU**: Intel i5-3570K (Ivy Bridge, no AVX2/FMA)
 
 Likely affects all Polaris GPUs (RX 460–590) on Windows.
+
+## Documents
+
+- [Hardware Receipt](HARDWARE-RECEIPT.md) — Why this repo exists and what it preserves
+- [Known-Good State](KNOWN-GOOD-STATE.md) — Verified configuration table
+- [Rebuild Steps](REBUILD-STEPS.md) — Complete Windows rebuild procedure
+- [Security Notes](SECURITY.md) — LAN-only deployment guidance
+- [Changelog](CHANGELOG.md)
 
 ## License
 

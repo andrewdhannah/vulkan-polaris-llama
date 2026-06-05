@@ -8,7 +8,7 @@
  *     MSBuild: should be part of the solution once cmake is configured
  *
  * Usage:
- *   llama-server-mini -m model.gguf [-p 8080] [-c 32768] [-ngl 99]
+ *   llama-server-mini -m model.gguf [-p 8080] [-c 32768] [-ngl 99] [--host 0.0.0.0] [--api-key <key>]
  *
  *   Then from anywhere on the network:
  *     curl http://192.168.0.158:8080/v1/chat/completions \
@@ -20,6 +20,7 @@
 #include "ggml.h"
 
 #include <clocale>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -52,6 +53,10 @@ static int g_port = 8080;
 static int g_n_ctx = 32768;
 static int g_ngl = 99;
 static int g_n_predict = 512;
+static std::string g_host = "0.0.0.0";
+static std::string g_api_key;
+
+static const size_t MAX_REQUEST_BODY = 1048576; // 1 MB
 
 // -----------------------------------------------------------------------
 // global model & context (protected by a mutex — one request at a time)
@@ -71,7 +76,14 @@ static std::atomic<bool> g_running{true};
 // helpers
 // -----------------------------------------------------------------------
 static void print_usage(const char * prog) {
-    fprintf(stderr, "\nUsage: %s -m model.gguf [-p port] [-c ctx] [-ngl ngl] [-n predict]\n\n", prog);
+    fprintf(stderr, "\nUsage: %s -m model.gguf [-p port] [-c ctx] [-ngl ngl] [-n predict] [--host address] [--api-key key]\n\n", prog);
+    fprintf(stderr, "  -m <path>       Path to GGUF model file (required)\n");
+    fprintf(stderr, "  -p <port>       HTTP port (default: 8080)\n");
+    fprintf(stderr, "  -c <tokens>     Context size (default: 32768)\n");
+    fprintf(stderr, "  -ngl <n>        GPU layers to offload (default: 99)\n");
+    fprintf(stderr, "  -n <tokens>     Max tokens to generate (default: 512)\n");
+    fprintf(stderr, "  --host <addr>   Bind address (default: 0.0.0.0, use 127.0.0.1 for local-only)\n");
+    fprintf(stderr, "  --api-key <key> Require Authorization: Bearer <key> header\n\n");
 }
 
 static std::string url_decode(const std::string & src) {
@@ -214,6 +226,7 @@ static void send_response(int client_fd, int status, const std::string & content
         case 200: resp << "OK"; break;
         case 400: resp << "Bad Request"; break;
         case 404: resp << "Not Found"; break;
+        case 413: resp << "Request Entity Too Large"; break;
         case 500: resp << "Internal Server Error"; break;
         default:  resp << "Unknown";
     }
@@ -237,6 +250,42 @@ static void send_json(int client_fd, int status, const std::string & json_body) 
     send_response(client_fd, status, "application/json; charset=utf-8", json_body);
 }
 
+// Extract a header value from the raw header block
+static std::string get_header_value(const std::string & headers, const std::string & name) {
+    // Headers are \r\n delimited. Search for "Name: value" pattern.
+    std::string search = name + ": ";
+    size_t pos = headers.find(search);
+    if (pos == std::string::npos) {
+        // Try case-insensitive by checking lowercase
+        std::string lower_headers = headers;
+        std::string lower_search;
+        for (char c : search) lower_search += (char)tolower(c);
+        for (char & c : lower_headers) c = (char)tolower(c);
+        pos = lower_headers.find(lower_search);
+        if (pos == std::string::npos) return "";
+    }
+    size_t val_start = pos + search.size();
+    size_t val_end = headers.find("\r\n", val_start);
+    if (val_end == std::string::npos) {
+        val_end = headers.size();
+    }
+    std::string val = headers.substr(val_start, val_end - val_start);
+    // Trim trailing whitespace / CR
+    while (!val.empty() && (val.back() == ' ' || val.back() == '\r')) val.pop_back();
+    return val;
+}
+
+// Check if the request passes API key authentication
+static bool check_auth(const std::string & auth_header) {
+    if (g_api_key.empty()) return true; // no key configured = no auth required
+    if (auth_header.empty()) return false;
+    // Expect "Bearer <key>"
+    if (auth_header.size() < 8) return false;
+    if (auth_header.substr(0, 7) != "Bearer ") return false;
+    std::string token = auth_header.substr(7);
+    return token == g_api_key;
+}
+
 // -----------------------------------------------------------------------
 // Request parser (minimal — just enough for our endpoints)
 // -----------------------------------------------------------------------
@@ -244,6 +293,7 @@ struct HttpRequest {
     std::string method;
     std::string path;
     std::string body;
+    std::string raw_headers; // full header block for auth / header extraction
 };
 
 static bool parse_http(int client_fd, HttpRequest & req) {
@@ -261,6 +311,7 @@ static bool parse_http(int client_fd, HttpRequest & req) {
     if (header_end == std::string::npos) return false;
 
     std::string header_part = raw.substr(0, header_end);
+    req.raw_headers = header_part;
 
     // Parse first line: METHOD /path HTTP/1.1
     size_t first_space = header_part.find(' ');
@@ -272,10 +323,16 @@ static bool parse_http(int client_fd, HttpRequest & req) {
     req.path = header_part.substr(first_space + 1, second_space - first_space - 1);
 
     // Determine Content-Length
-    size_t cl_pos = header_part.find("Content-Length: ");
+    std::string cl_str = get_header_value(header_part, "Content-Length");
     size_t content_length = 0;
-    if (cl_pos != std::string::npos) {
-        content_length = (size_t)std::stoll(header_part.substr(cl_pos + 16));
+    if (!cl_str.empty()) {
+        content_length = (size_t)std::stoll(cl_str);
+    }
+
+    // Enforce max body size
+    if (content_length > MAX_REQUEST_BODY) {
+        req.body = "";
+        return true; // caller can check content_length vs MAX_REQUEST_BODY
     }
 
     // Read body: use what we already have, then read more if needed
@@ -366,18 +423,49 @@ static bool extract_json_bool(const std::string & json, const std::string & key,
 }
 
 // -----------------------------------------------------------------------
+// Close socket helper (platform abstraction)
+// -----------------------------------------------------------------------
+static void close_socket(int fd) {
+#ifdef _WIN32
+    closesocket(fd);
+#else
+    close(fd);
+#endif
+}
+
+// -----------------------------------------------------------------------
 // Handle a single client connection
 // -----------------------------------------------------------------------
 static void handle_client(int client_fd) {
     HttpRequest req;
     if (!parse_http(client_fd, req)) {
         send_json(client_fd, 400, R"({"error":"bad request"})");
-#ifdef _WIN32
-        closesocket(client_fd);
-#else
-        close(client_fd);
-#endif
+        close_socket(client_fd);
         return;
+    }
+
+    // Check Content-Length against max body size
+    std::string cl_str = get_header_value(req.raw_headers, "Content-Length");
+    if (!cl_str.empty()) {
+        size_t content_length = (size_t)std::stoll(cl_str);
+        if (content_length > MAX_REQUEST_BODY) {
+            send_json(client_fd, 413,
+                R"({"error":"request too large","limit":)" + std::to_string(MAX_REQUEST_BODY) + "}");
+            close_socket(client_fd);
+            return;
+        }
+    }
+
+    // Check authentication for protected endpoints
+    bool needs_auth = (req.method == "POST" && req.path == "/v1/chat/completions");
+    if (needs_auth) {
+        std::string auth = get_header_value(req.raw_headers, "Authorization");
+        if (!check_auth(auth)) {
+            send_json(client_fd, 401,
+                R"({"error":"unauthorized","message":"Missing or invalid API key. Provide Authorization: Bearer <key> header."})");
+            close_socket(client_fd);
+            return;
+        }
     }
 
     // CORS preflight
@@ -385,7 +473,7 @@ static void handle_client(int client_fd) {
         std::string resp = "HTTP/1.1 204 No Content\r\n"
                            "Access-Control-Allow-Origin: *\r\n"
                            "Access-Control-Allow-Methods: POST, GET, OPTIONS\r\n"
-                           "Access-Control-Allow-Headers: Content-Type\r\n"
+                           "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
                            "Connection: close\r\n"
                            "\r\n";
 #ifdef _WIN32
@@ -393,11 +481,7 @@ static void handle_client(int client_fd) {
 #else
         write(client_fd, resp.c_str(), resp.size());
 #endif
-#ifdef _WIN32
-        closesocket(client_fd);
-#else
-        close(client_fd);
-#endif
+        close_socket(client_fd);
         return;
     }
 
@@ -405,23 +489,19 @@ static void handle_client(int client_fd) {
     if (req.method == "GET" && req.path == "/v1/models") {
         send_json(client_fd, 200,
             R"({"object":"list","data":[{"id":"qwen2.5-coder-1.5b-q8_0","object":"model","owned_by":"local"}]})");
-#ifdef _WIN32
-        closesocket(client_fd);
-#else
-        close(client_fd);
-#endif
+        close_socket(client_fd);
         return;
     }
 
     // GET /health or /
     if (req.method == "GET" && (req.path == "/health" || req.path == "/")) {
-        send_json(client_fd, 200,
-            R"({"status":"ok","model":"qwen2.5-coder-1.5b-q8_0"})");
-#ifdef _WIN32
-        closesocket(client_fd);
-#else
-        close(client_fd);
-#endif
+        std::string health = R"({"status":"ok",)"
+                             R"("model":")" + json_escape(g_model_path) + R"(",)"
+                             R"("n_ctx":)" + std::to_string(g_n_ctx) + R"(,)"
+                             R"("n_gpu_layers":)" + std::to_string(g_ngl) + R"(,)"
+                             R"("auth_required":)" + (g_api_key.empty() ? "false" : "true") + "}";
+        send_json(client_fd, 200, health);
+        close_socket(client_fd);
         return;
     }
 
@@ -514,11 +594,7 @@ static void handle_client(int client_fd) {
 
         if (user_content.empty()) {
             send_json(client_fd, 400, R"({"error":"no user message found"})");
-#ifdef _WIN32
-            closesocket(client_fd);
-#else
-            close(client_fd);
-#endif
+            close_socket(client_fd);
             return;
         }
 
@@ -559,21 +635,13 @@ static void handle_client(int client_fd) {
             send_json(client_fd, 200, json);
         }
 
-#ifdef _WIN32
-        closesocket(client_fd);
-#else
-        close(client_fd);
-#endif
+        close_socket(client_fd);
         return;
     }
 
     // Fallback: 404
     send_json(client_fd, 404, R"({"error":"not found"})");
-#ifdef _WIN32
-    closesocket(client_fd);
-#else
-    close(client_fd);
-#endif
+    close_socket(client_fd);
 }
 
 // -----------------------------------------------------------------------
@@ -594,6 +662,10 @@ int main(int argc, char ** argv) {
             g_ngl = std::stoi(argv[++i]);
         } else if (strcmp(argv[i], "-n") == 0 && i + 1 < argc) {
             g_n_predict = std::stoi(argv[++i]);
+        } else if (strcmp(argv[i], "--host") == 0 && i + 1 < argc) {
+            g_host = argv[++i];
+        } else if (strcmp(argv[i], "--api-key") == 0 && i + 1 < argc) {
+            g_api_key = argv[++i];
         } else {
             print_usage(argv[0]);
             return 1;
@@ -646,7 +718,7 @@ int main(int argc, char ** argv) {
 
     g_formatted.resize(llama_n_ctx(g_ctx));
 
-    fprintf(stderr, "[server] Model loaded. Starting HTTP on port %d...\n", g_port);
+    fprintf(stderr, "[server] Model loaded. Starting HTTP...\n");
 
     // -------------------------------------------------------------------
     // Network init
@@ -680,11 +752,19 @@ int main(int argc, char ** argv) {
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
+#ifdef _WIN32
+    addr.sin_addr.S_un.S_addr = inet_addr(g_host.c_str());
+    if (addr.sin_addr.S_un.S_addr == INADDR_NONE) {
+#else
+    if (inet_pton(AF_INET, g_host.c_str(), &addr.sin_addr) <= 0) {
+#endif
+        fprintf(stderr, "[server] Invalid bind address: %s\n", g_host.c_str());
+        return 1;
+    }
     addr.sin_port = htons(g_port);
 
     if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        fprintf(stderr, "[server] Failed to bind port %d\n", g_port);
+        fprintf(stderr, "[server] Failed to bind %s:%d\n", g_host.c_str(), g_port);
 #ifdef _WIN32
         closesocket(server_fd);
         WSACleanup();
@@ -705,11 +785,19 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    fprintf(stderr, "[server] Listening on http://0.0.0.0:%d\n", g_port);
-    fprintf(stderr, "[server] From your Mac:\n");
+    fprintf(stderr, "[server] Model: %s\n", g_model_path.c_str());
+    fprintf(stderr, "[server] Context: %d tokens, GPU layers: %d\n", g_n_ctx, g_ngl);
+    fprintf(stderr, "[server] Listening on http://%s:%d\n", g_host.c_str(), g_port);
+    fprintf(stderr, "[server] Auth: %s\n", g_api_key.empty() ? "disabled" : "enabled");
+    fprintf(stderr, "[server] \n");
+    fprintf(stderr, "[server] From another machine on LAN:\n");
     fprintf(stderr, "  curl http://<WINDOWS_IP>:%d/v1/chat/completions \\\n", g_port);
     fprintf(stderr, "    -H \"Content-Type: application/json\" \\\n");
     fprintf(stderr, "    -d '{\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}]}'\n");
+    if (!g_api_key.empty()) {
+        fprintf(stderr, "    -H \"Authorization: Bearer <api-key>\" \\\n");
+    }
+    fprintf(stderr, "\n");
 
     // Accept loop
     while (g_running) {
