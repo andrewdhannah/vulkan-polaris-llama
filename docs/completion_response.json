@@ -1,1 +1,0 @@
-{"id":"chat-1780689670","object":"chat.completion","created":1780689670,"model":"qwen2.5-coder-1.5b-q8_0","choices":[{"index":0,"message":{"role":"assistant","content":"Hello! How can I assist you?"},"finish_reason":"stop"}]}

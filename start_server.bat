@@ -9,7 +9,7 @@ REM MODEL:     path to your GGUF model file
 REM ===================================================
 
 set LLAMA_DIR=G:\llama.cpp
-set MODEL=G:\Downloads\Qwen2.5-MOE-2X1.5B-DeepSeek-Uncensored-Censored-4B-D_AU-Q4_k_m.gguf
+set MODEL=%LLAMA_DIR%\models\Qwen2.5-MOE-2X1.5B-DeepSeek-Uncensored-Censored-4B-D_AU-Q4_k_m.gguf
 set PORT=8080
 set N_CTX=32768
 set NGL=99

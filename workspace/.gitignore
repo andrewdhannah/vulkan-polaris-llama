@@ -1,0 +1,12 @@
+# Ignore model files (too large, not tracked in git)
+*.gguf
+model.safetensors
+
+# Temp files
+G:\temp\
+*.log
+*.out
+
+# OS junk
+Thumbs.db
+.DS_Store

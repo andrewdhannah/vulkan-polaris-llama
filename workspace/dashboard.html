@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>llama.cpp Model Dashboard — RX 570</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --dim: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 2rem;
+    max-width: 960px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 1.8rem; margin-bottom: 0.25rem; }
+  .subtitle { color: var(--dim); margin-bottom: 2rem; font-size: 0.9rem; }
+
+  /* Status bar */
+  #status-bar {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1.5rem;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+  .status-dot {
+    width: 12px; height: 12px; border-radius: 50%;
+    display: inline-block;
+  }
+  .status-dot.on { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .status-dot.off { background: var(--red); box-shadow: 0 0 8px var(--red); }
+  .status-dot.loading { background: var(--yellow); animation: pulse 1s infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  .status-label { font-weight: 600; }
+  .status-label.on { color: var(--green); }
+  .status-label.off { color: var(--red); }
+  .status-label.loading { color: var(--yellow); }
+  .status-model { color: var(--accent); font-family: monospace; }
+  .status-refresh {
+    margin-left: auto;
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--dim);
+    padding: 0.35rem 0.75rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.8rem;
+  }
+  .status-refresh:hover { background: var(--border); color: var(--text); }
+
+  /* Model cards */
+  .model-grid { display: grid; gap: 1rem; }
+  .model-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.25rem;
+    transition: border-color 0.2s;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 1rem;
+  }
+  .model-card.running { border-color: var(--green); }
+  .model-card:hover { border-color: var(--accent); }
+  .model-info { flex: 1; }
+  .model-rank { font-size: 0.8rem; font-weight: 600; color: var(--yellow); margin-bottom: 0.2rem; }
+  .model-name { font-size: 1.1rem; font-weight: 600; margin-bottom: 0.15rem; }
+  .model-name .badge {
+    font-size: 0.65rem;
+    background: var(--green);
+    color: #000;
+    padding: 0.1rem 0.4rem;
+    border-radius: 10px;
+    vertical-align: middle;
+    margin-left: 0.5rem;
+    font-weight: 600;
+  }
+  .model-details {
+    font-size: 0.82rem;
+    color: var(--dim);
+    line-height: 1.5;
+    margin-top: 0.3rem;
+  }
+  .model-details span { margin-right: 1rem; }
+  .model-notes {
+    font-size: 0.8rem;
+    color: var(--yellow);
+    margin-top: 0.25rem;
+    font-style: italic;
+  }
+  .model-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    min-width: 120px;
+    align-items: flex-end;
+  }
+  .btn {
+    display: inline-block;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text);
+    padding: 0.4rem 1rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    text-align: center;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .btn:hover { background: var(--border); }
+  .btn.primary {
+    background: var(--green);
+    color: #000;
+    border-color: var(--green);
+    font-weight: 600;
+  }
+  .btn.primary:hover { background: #2ea043; }
+  .btn.primary:disabled {
+    opacity: 0.4;
+    cursor: default;
+    background: var(--green);
+  }
+  .btn.secondary {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .btn.secondary:hover { background: rgba(88,166,255,0.1); }
+  .btn.danger {
+    border-color: var(--red);
+    color: var(--red);
+  }
+  .btn.danger:hover { background: rgba(248,81,73,0.1); }
+  .cmd-hint {
+    font-size: 0.7rem;
+    color: var(--dim);
+    font-family: monospace;
+    margin-top: 0.3rem;
+  }
+
+  /* Responsive */
+  @media (max-width: 640px) {
+    body { padding: 1rem; }
+    .model-card { flex-direction: column; }
+    .model-actions { flex-direction: row; min-width: unset; }
+  }
+</style>
+</head>
+<body>
+
+<h1>🖥️ llama.cpp Model Dashboard</h1>
+<p class="subtitle">AMD RX 570 4GB · i5-3570K · Vulkan</p>
+
+<div id="status-bar">
+  <span class="status-dot off" id="status-dot"></span>
+  <span class="status-label off" id="status-label">Checking...</span>
+  <span id="status-model"></span>
+  <button class="status-refresh" onclick="refreshStatus()">⟳ Refresh</button>
+</div>
+
+<div class="model-grid" id="model-grid"></div>
+
+<script>
+const API_PORT = 9120;
+const MODELS = [
+  {
+    name: 'Phi-4-mini 3.8B Q4_K_M',
+    key: 'phi-4',
+    file: 'microsoft_Phi-4-mini-instruct-Q4_K_M.gguf',
+    size: '2.32 GB',
+    layers: 33,
+    speed: '14–51 tok/s',
+    rank: '🥇 Best All-Rounder',
+    notes: 'Best quality, math, & context retention'
+  },
+  {
+    name: 'Llama 3.2 3B Q5_K_M',
+    key: 'llama-3.2',
+    file: 'Llama-3.2-3B-Instruct-Q5_K_M.gguf',
+    size: '2.16 GB',
+    layers: 29,
+    speed: '32–49 tok/s',
+    rank: '🥈 Fastest Daily Driver',
+    notes: 'Fastest generation, good all-around'
+  },
+  {
+    name: 'Gemma 3 4B Q4_K_M',
+    key: 'gemma-3',
+    file: 'gemma-3-4b-it-Q4_K_M.gguf',
+    size: '2.32 GB',
+    layers: 35,
+    speed: '19–35 tok/s',
+    rank: '🥉 Best Verbose Assistant',
+    notes: 'Most thorough, detailed responses'
+  },
+  {
+    name: 'Qwen3 4B Q4_K_M',
+    key: 'qwen3',
+    file: 'Qwen_Qwen3-4B-Q4_K_M.gguf',
+    size: '2.33 GB',
+    layers: 37,
+    speed: '22–40 tok/s',
+    rank: '4th',
+    notes: '⚠️ <think> verbosity, needs >8K context'
+  }
+];
+
+async function refreshStatus() {
+  const dot = document.getElementById('status-dot');
+  const label = document.getElementById('status-label');
+  const modelEl = document.getElementById('status-model');
+  dot.className = 'status-dot loading';
+  label.className = 'status-label loading';
+  label.textContent = 'Checking...';
+  modelEl.textContent = '';
+
+  try {
+    const resp = await fetch(`http://localhost:${API_PORT}/health`, { signal: AbortSignal.timeout(3000) });
+    if (resp.ok) {
+      dot.className = 'status-dot on';
+      label.className = 'status-label on';
+      label.textContent = 'Running';
+
+      // Try to get current model from command line
+      modelEl.textContent = '— model unknown';
+      document.querySelectorAll('.model-card').forEach(c => c.classList.remove('running'));
+    } else {
+      throw new Error('not ok');
+    }
+  } catch {
+    dot.className = 'status-dot off';
+    label.className = 'status-label off';
+    label.textContent = 'Offline';
+    modelEl.textContent = '';
+    document.querySelectorAll('.model-card').forEach(c => c.classList.remove('running'));
+  }
+}
+
+function renderModels() {
+  const grid = document.getElementById('model-grid');
+  grid.innerHTML = '';
+
+  for (const m of MODELS) {
+    const card = document.createElement('div');
+    card.className = 'model-card';
+    card.id = `card-${m.key}`;
+
+    card.innerHTML = `
+      <div class="model-info">
+        <div class="model-rank">${m.rank}</div>
+        <div class="model-name">${m.name}</div>
+        <div class="model-details">
+          <span>📦 ${m.size}</span>
+          <span>🧠 ${m.layers} layers</span>
+          <span>⚡ ${m.speed}</span>
+        </div>
+        <div class="model-notes">${m.notes}</div>
+        <div class="cmd-hint">.\model_manager.ps1 switch ${m.key}</div>
+      </div>
+      <div class="model-actions">
+        <button class="btn primary" onclick="switchModel('${m.key}')" id="btn-${m.key}">Switch</button>
+        <button class="btn secondary" onclick="navigator.clipboard.writeText('switch ${m.key}')">Copy command</button>
+      </div>
+    `;
+
+    grid.appendChild(card);
+  }
+}
+
+async function switchModel(key) {
+  const btn = document.getElementById(`btn-${key}`);
+  btn.disabled = true;
+  btn.textContent = 'Loading...';
+
+  // We can't call PowerShell from the browser, so show instructions
+  const cmd = `.\\model_manager.ps1 switch ${key}`;
+  btn.textContent = 'Run in terminal:';
+  btn.className = 'btn';
+
+  // Show a more prominent message
+  const model = MODELS.find(m => m.key === key);
+  alert(`Switching to ${model.name}\n\nRun this in PowerShell (as admin):\n\n  ${cmd}\n\nOr ask OpenWork to:\n  "switch to ${key}"`);
+
+  btn.disabled = false;
+  btn.textContent = 'Switch';
+  btn.className = 'btn primary';
+}
+
+renderModels();
+refreshStatus();
+setInterval(refreshStatus, 15000);
+</script>
+</body>
+</html>
