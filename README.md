@@ -102,3 +102,4 @@ Detailed troubleshooting guide: [`docs/TROUBLESHOOTING-WINDOWS-LLAMA-RUNTIME.md`
 - Full build guide: [`docs/WINDOWS-LLAMA-MANAGER-HARDENING.md`](docs/WINDOWS-LLAMA-MANAGER-HARDENING.md)
 - Alias patch details: [`docs/LLAMA-SERVER-MINI-ALIAS-PATCH.md`](docs/LLAMA-SERVER-MINI-ALIAS-PATCH.md)
 - Lessons learned & handoff: [`docs/HANDOFF-WINDOWS-LLAMA-POC.md`](docs/HANDOFF-WINDOWS-LLAMA-POC.md)
+- Runtime contract (substrate-agnostic): [`docs/LIBRARIAN-RUNTIME-CONTRACT.md`](docs/LIBRARIAN-RUNTIME-CONTRACT.md)
