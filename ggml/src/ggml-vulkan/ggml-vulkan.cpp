@@ -5746,37 +5746,35 @@ static vk_device ggml_vk_get_device(size_t idx) {
         // Allow overriding avoiding the graphics queue because it can increase performance on RADV
         const bool allow_graphics_queue = (getenv("GGML_VK_ALLOW_GRAPHICS_QUEUE") != nullptr);
         const vk::QueueFlagBits graphics_flag = allow_graphics_queue ? (vk::QueueFlagBits)0 : vk::QueueFlagBits::eGraphics;
-        const uint32_t compute_queue_family_index = ggml_vk_find_queue_family_index(queue_family_props, vk::QueueFlagBits::eCompute, graphics_flag, -1, 1);
-        const uint32_t transfer_queue_family_index = ggml_vk_find_queue_family_index(queue_family_props, vk::QueueFlagBits::eTransfer, vk::QueueFlagBits::eCompute | graphics_flag, compute_queue_family_index, 1);
+        uint32_t compute_queue_family_index = ggml_vk_find_queue_family_index(queue_family_props, vk::QueueFlagBits::eCompute, graphics_flag, -1, 1);
+        uint32_t transfer_queue_family_index = ggml_vk_find_queue_family_index(queue_family_props, vk::QueueFlagBits::eTransfer, vk::QueueFlagBits::eCompute | graphics_flag, compute_queue_family_index, 1);
 
         const float priorities[] = { 1.0f, 1.0f };
         device->single_queue = compute_queue_family_index == transfer_queue_family_index && queue_family_props[compute_queue_family_index].queueCount == 1;
 
-        std::vector<vk::DeviceQueueCreateInfo> device_queue_create_infos;
+        std::vector<VkDeviceQueueCreateInfo> device_queue_create_infos;
         if (compute_queue_family_index != transfer_queue_family_index) {
-            device_queue_create_infos.push_back({vk::DeviceQueueCreateFlags(), compute_queue_family_index, 1, priorities});
-            device_queue_create_infos.push_back({vk::DeviceQueueCreateFlags(), transfer_queue_family_index, 1, priorities + 1});
+            device_queue_create_infos.push_back({VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, nullptr, 0, compute_queue_family_index, 1, priorities});
+            device_queue_create_infos.push_back({VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, nullptr, 0, transfer_queue_family_index, 1, priorities + 1});
         } else if(!device->single_queue) {
-            device_queue_create_infos.push_back({vk::DeviceQueueCreateFlags(), compute_queue_family_index, 2, priorities});
+            device_queue_create_infos.push_back({VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, nullptr, 0, compute_queue_family_index, 2, priorities});
         } else {
-            device_queue_create_infos.push_back({vk::DeviceQueueCreateFlags(), compute_queue_family_index, 1, priorities});
+            device_queue_create_infos.push_back({VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, nullptr, 0, compute_queue_family_index, 1, priorities});
         }
-        vk::DeviceCreateInfo device_create_info{};
         std::vector<const char *> device_extensions;
-        vk::PhysicalDeviceFeatures device_features = device->physical_device.getFeatures();
+        VkPhysicalDeviceFeatures device_features;
+        vkGetPhysicalDeviceFeatures(device->physical_device, &device_features);
 
         VkPhysicalDeviceFeatures2 device_features2;
         device_features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
         device_features2.pNext = nullptr;
-        device_features2.features = (VkPhysicalDeviceFeatures)device_features;
+        device_features2.features = device_features;
 
-        VkPhysicalDeviceVulkan11Features vk11_features;
-        vk11_features.pNext = nullptr;
+        VkPhysicalDeviceVulkan11Features vk11_features = {};
         vk11_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
         device_features2.pNext = &vk11_features;
 
-        VkPhysicalDeviceVulkan12Features vk12_features;
-        vk12_features.pNext = nullptr;
+        VkPhysicalDeviceVulkan12Features vk12_features = {};
         vk12_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
         vk11_features.pNext = &vk12_features;
 
@@ -6175,12 +6173,49 @@ static vk_device ggml_vk_get_device(size_t idx) {
 #endif
         device->name = GGML_VK_NAME + std::to_string(idx);
 
-        device_create_info
-            .setFlags(vk::DeviceCreateFlags())
-            .setQueueCreateInfos(device_queue_create_infos)
-            .setPEnabledExtensionNames(device_extensions);
-        device_create_info.setPNext(&device_features2);
-        device->device = device->physical_device.createDevice(device_create_info);
+        // Build a simplified device creation pNext chain (Vk11+Vk12 only).
+        // The full chain (with subgroup/maint4/pep extras) can cause VK_ERROR_DEVICE_LOST
+        // on some drivers (notably AMD Polaris RX 570). We already queried features with
+        // the full chain above; use a minimal chain for device creation.
+        vk11_features.pNext = &vk12_features;
+        vk12_features.pNext = nullptr;
+        device_features2.pNext = &vk11_features;
+
+        // Also ensure we use the graphics-capable queue family (QF 0) for compute
+        // on Polaris, where QF 1 + QF 2 dual non-graphics queues triggers DEVICE_LOST.
+        std::vector<VkDeviceQueueCreateInfo> device_qcis;
+        if (compute_queue_family_index != 0 && transfer_queue_family_index != 0) {
+            // Fall back to single QF 0 for Polaris compatibility
+            std::cerr << "ggml_vulkan: using single QF 0 queue for Polaris compatibility" << std::endl;
+            device_qcis.push_back({VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, nullptr, 0, 0, 1, priorities});
+            device->single_queue = true;
+            compute_queue_family_index = 0;
+            transfer_queue_family_index = 0;
+        } else {
+            device_qcis = device_queue_create_infos;
+        }
+
+        {
+            VkDeviceCreateInfo dci{};
+            dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+            dci.pNext = &device_features2;
+            dci.queueCreateInfoCount = (uint32_t)device_qcis.size();
+            dci.pQueueCreateInfos = device_qcis.data();
+            dci.enabledExtensionCount = (uint32_t)device_extensions.size();
+            dci.ppEnabledExtensionNames = device_extensions.data();
+
+            VkDevice raw_device;
+            VkResult res = vkCreateDevice(
+                static_cast<VkPhysicalDevice>(device->physical_device),
+                &dci, nullptr, &raw_device);
+            if (res == VK_SUCCESS) {
+                device->device = vk::Device(raw_device);
+                std::cerr << "=== Using C API device (QF " << compute_queue_family_index << ") ===" << std::endl;
+            } else {
+                std::cerr << "ggml_vulkan: createDevice failed (res=" << res << ")" << std::endl;
+                throw std::runtime_error("Vulkan device creation failed");
+            }
+        }
 
         // Queues
         ggml_vk_create_queue(device, device->compute_queue, compute_queue_family_index, 0, { vk::PipelineStageFlagBits::eComputeShader | vk::PipelineStageFlagBits::eTransfer }, false);
@@ -6409,13 +6444,11 @@ static void ggml_vk_print_gpu_info(size_t idx) {
     device_features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     device_features2.pNext = nullptr;
 
-    VkPhysicalDeviceVulkan11Features vk11_features;
-    vk11_features.pNext = nullptr;
+    VkPhysicalDeviceVulkan11Features vk11_features = {};
     vk11_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
     device_features2.pNext = &vk11_features;
 
-    VkPhysicalDeviceVulkan12Features vk12_features;
-    vk12_features.pNext = nullptr;
+    VkPhysicalDeviceVulkan12Features vk12_features = {};
     vk12_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
     vk11_features.pNext = &vk12_features;
 
