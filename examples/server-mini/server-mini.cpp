@@ -428,6 +428,29 @@ static void handle_client(int client_fd) {
         return;
     }
 
+    // POST /reset — clear conversation history and KV cache
+    if (req.method == "POST" && req.path == "/reset") {
+        std::lock_guard<std::mutex> lock(g_mutex);
+
+        // Free all message content strings
+        for (auto & msg : g_messages) {
+            free(const_cast<char *>(msg.content));
+        }
+        g_messages.clear();
+        g_prev_len = 0;
+
+        // Clear the KV cache
+        llama_memory_clear(llama_get_memory(g_ctx), true);
+
+        send_json(client_fd, 200, R"({"status":"ok","message":"context reset"})");
+#ifdef _WIN32
+        closesocket(client_fd);
+#else
+        close(client_fd);
+#endif
+        return;
+    }
+
     // POST /v1/chat/completions
     if (req.method == "POST" && req.path == "/v1/chat/completions") {
         // Extract prompt from messages

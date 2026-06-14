@@ -150,6 +150,67 @@ Update the `file` field in `$Models` if needed.
 
 ---
 
+## Context Is Full / `[context full]` Response
+
+The mini server accumulates conversation history in RAM. Once the KV cache fills (4096 tokens by default), it returns `[context full]`.
+
+### Option A: Use the `/reset` endpoint (fastest)
+
+```powershell
+# Reset context without restarting the server
+Invoke-RestMethod -Uri "http://localhost:9120/reset" -Method Post
+# → {"status":"ok","message":"context reset"}
+```
+
+### Option B: Restart the server
+
+```powershell
+.\model_manager.ps1 stop
+.\model_manager.ps1 start phi-4
+```
+
+### Option C: Use the Rust router (recommended for multiple sessions)
+
+The router automatically manages context per session. When switching sessions, it calls `/reset` on llama.cpp and repacks the new session's history.
+
+```powershell
+# Start router (listens on port 8080)
+.\router\target\release\llama-router.exe
+
+# Use router instead of direct llama.cpp
+curl http://localhost:8080/v1/chat/completions `
+  -H "Content-Type: application/json" `
+  -H "X-Librarian-Session: session-1" `
+  -d '{"messages":[{"role":"user","content":"Hello"}]}'
+```
+
+---
+
+## Router Issues
+
+### Router won't start
+
+```powershell
+# Check if port 8080 is in use
+Get-NetTCPConnection -LocalPort 8080 -ErrorAction SilentlyContinue
+
+# Check if llama.cpp is running on port 9120
+Invoke-RestMethod -Uri "http://127.0.0.1:9120/health"
+```
+
+### Router returns 502 Bad Gateway
+
+The router can't reach llama.cpp. Ensure:
+1. `llama-server-mini.exe` is running on port 9120
+2. It's bound to `127.0.0.1` (not just localhost name resolution)
+3. No firewall is blocking loopback traffic
+
+### Session state lost after router restart
+
+The router stores sessions in RAM only. Restarting the router clears all sessions. SQLite persistence is planned for a future update.
+
+---
+
 ## Inference Works But Prompt Following Fails
 
 **This is a model capability issue, not a runtime issue.**

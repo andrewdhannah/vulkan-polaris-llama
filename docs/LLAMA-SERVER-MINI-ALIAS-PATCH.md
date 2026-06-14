@@ -1,6 +1,6 @@
-# llama-server-mini `--alias` Patch
+# llama-server-mini `--alias` Patch + `/reset` Endpoint
 
-> **Date:** 2026-06-12  
+> **Date:** 2026-06-13 (updated from 2026-06-12)
 > **File patched:** `examples/server-mini/server-mini.cpp`
 
 ---
@@ -119,6 +119,54 @@ cmake --build . --target llama-server-mini --config Release
 ```
 
 Output: `G:\llama.cpp\build_vs\bin\Release\llama-server-mini.exe` (49.1 MB)
+
+---
+
+## `/reset` Endpoint (Added 2026-06-13)
+
+### Problem
+
+The mini server accumulates conversation history in a global `g_messages` vector. Once the KV cache fills (4096 tokens by default), it returns `[context full]` and cannot process new requests. The only way to reset was to restart the server process.
+
+### Solution
+
+Added a `POST /reset` endpoint that:
+1. Clears the `g_messages` vector (frees all message content strings)
+2. Resets `g_prev_len` to 0
+3. Calls `llama_memory_clear()` to wipe the KV cache
+
+### Implementation
+
+```cpp
+// POST /reset — clear conversation history and KV cache
+if (req.method == "POST" && req.path == "/reset") {
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    // Free all message content strings
+    for (auto & msg : g_messages) {
+        free(const_cast<char *>(msg.content));
+    }
+    g_messages.clear();
+    g_prev_len = 0;
+
+    // Clear the KV cache
+    llama_memory_clear(llama_get_memory(g_ctx), true);
+
+    send_json(client_fd, 200, R"({"status":"ok","message":"context reset"})");
+    // ...
+}
+```
+
+### Usage
+
+```powershell
+Invoke-RestMethod -Uri "http://localhost:9120/reset" -Method Post
+# → {"status":"ok","message":"context reset"}
+```
+
+### Architecture Note
+
+The `/reset` endpoint is used by the Rust router to clear llama.cpp context when switching between sessions. The router owns session state; llama.cpp is a stateless worker.
 
 ---
 

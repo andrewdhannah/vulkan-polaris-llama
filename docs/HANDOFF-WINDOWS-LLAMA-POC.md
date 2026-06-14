@@ -1,8 +1,8 @@
 # Handoff: Windows llama.cpp POC
 
-> **Purpose:** Let a future session start clean with full context of today's work.
-> **Date:** 2026-06-12  
-> **Last commit:** `f46bf9b`
+> **Purpose:** Let a future session start clean with full context of all work.
+> **Date:** 2026-06-13 (updated from 2026-06-12)
+> **Last commit:** `d65ad67` (before router work)
 
 ---
 
@@ -10,19 +10,33 @@
 
 | Item | Value |
 |------|-------|
-| **Git HEAD** | `f46bf9b` — `feat: backport --alias flag to llama-server-mini + identity system` |
-| **Binary** | `G:\llama.cpp\build_vs\bin\Release\llama-server-mini.exe` (49.1 MB, built 2026-06-12) |
-| **Manager script** | `G:\llama.cpp\model_manager.ps1` |
-| **Knowledge base** | `G:\llama.cpp\LIBRARIAN_KNOWLEDGE.md` |
-| **Server source** | `examples/server-mini/server-mini.cpp` (patched with `--alias`) |
-| **Vulkan backend** | `ggml/src/ggml-vulkan/ggml-vulkan.cpp` (Polaris QF 0 fix applied) |
+| **Git HEAD** | `d65ad67` — `Add Librarian Runtime Contract` |
+| **Binary** | `build_vs\bin\Release\llama-server-mini.exe` (49.1 MB, rebuilt with `/reset`) |
+| **Router** | `router\target\release\llama-router.exe` (4.8 MB) |
+| **Full server** | `build_vs\bin\Release\llama-server.exe` (~200 MB, VRAM-heavy) |
+| **Manager script** | `model_manager.ps1` |
+| **Knowledge base** | `LIBRARIAN_KNOWLEDGE.md` |
+| **Server source** | `examples/server-mini/server-mini.cpp` (patched with `--alias` + `/reset`) |
+| **Vulkan backend** | `ggml/src/ggml-vulkan/ggml-vulkan.cpp` (Polaris QF 0 fix) |
+| **Router source** | `router/src/main.rs` + `router/Cargo.toml` |
 
-### Verified model alias test: `phi-4`
+### Verified endpoints
 
-```json
-GET /health        → {"status":"ok","model":"phi-4"}
-GET /v1/models     → {"data":[{"id":"phi-4","object":"model","owned_by":"local"}]}
-POST /chat/completions → "model":"phi-4" + "Hello! How can I assist you today?"
+```
+GET  /health                    → {"status":"ok","model":"phi-4"}
+GET  /v1/models                 → {"data":[{"id":"phi-4"}]}
+POST /v1/chat/completions       → OpenAI-compatible response
+POST /reset                     → {"status":"ok","message":"context reset"}
+```
+
+### Router endpoints (port 8080)
+
+```
+GET  /health                    → Router + llama.cpp health
+POST /v1/chat/completions       → Session-routed chat completion
+GET  /sessions                  → List active sessions
+GET  /sessions/{id}             → Session transcript
+POST /sessions/{id}/reset       → Clear session memory
 ```
 
 ### Known-good manager commands
@@ -34,8 +48,6 @@ cd G:\llama.cpp
 .\model_manager.ps1 start phi-4     # Launch chat (port 9120)
 .\model_manager.ps1 status          # Verify identity
 .\model_manager.ps1 stop            # Graceful stop
-.\model_manager.ps1 embed-start     # Launch embedding (port 9122)
-.\model_manager.ps1 embed-stop      # Stop embedding
 ```
 
 ---
@@ -52,15 +64,11 @@ Any binary built before 2026-06-12 has hardcoded `qwen2.5-coder-1.5b-q8_0` in th
 
 ### Do not backport full upstream `examples/server/` blindly
 
-The full server directory does not exist at commit `7c158fb`. Cherry-picking from a newer commit may break the `llama.h` API. Only attempt this if:
-
-1. You can resolve the API version mismatch
-2. You accept the ~2000+ line merge
-3. You verify all existing identity features still work
+The full server was built successfully but is **VRAM-heavy** (~3.4 GB+) and only achieves partial GPU offload on the RX 570 4GB. The mini server + router approach is preferred for this hardware.
 
 ### Do not erase dirty repo state with `git reset` or `git clean`
 
-The pre-existing dirty state (CRLF in README, CMakeLists.txt changes, Polaris fix) was intentional and committed. If the tree is dirty, investigate before resetting.
+The pre-existing dirty state was intentional and committed. If the tree is dirty, investigate before resetting.
 
 ### Do not treat exact-prompt obedience failure as a runtime issue
 
@@ -99,27 +107,27 @@ ggml_vulkan: using single QF 0 queue for Polaris compatibility
 
 A broad `/examples/server-mini/` rule hides the source `.cpp` file from git. Always check with `git check-ignore -v <file>` before assuming a file is tracked. Use specific artifact patterns instead of directory-level ignores.
 
+### 6. Two model instances don't fit in 4GB VRAM
+
+Running two `llama-server-mini.exe` processes requires ~6.6 GB VRAM (2 × 3.3 GB). The RX 570 has 4 GB. The correct solution is a **router** that maintains session state outside VRAM and feeds one bounded context to one llama.cpp worker.
+
+### 7. Full llama.cpp server is too heavy for RX 570
+
+The full server (`llama-server.exe`) uses more VRAM than the mini server due to unified KV cache, parallel slots, and additional buffers. On the RX 570 4GB, it can only achieve partial GPU offload (some layers on CPU), making it slower than the mini server.
+
 ---
 
 ## Files in This Commit
 
 ```
-commit f46bf9b6cf7ed26794a209fea9c3f047ad976ca3
-Author: Andrew Hannah <andrewdhannah@users.noreply.github.com>
-Date:   Fri Jun 12 13:06:58 2026 -0400
-
- feat: backport --alias flag to llama-server-mini + identity system
-
- .gitignore                           |  63 +++
- LIBRARIAN_KNOWLEDGE.md               | 477 +++++++++++++++++
- README.md                            | 636 ++--------------------
- _validate.ps1                        |   8 +
- examples/CMakeLists.txt              |   1 +
- examples/server-mini/CMakeLists.txt  |   7 +
- examples/server-mini/server-mini.cpp | 770 +++++++++++++++++++++++++++
- ggml/src/ggml-vulkan/ggml-vulkan.cpp |  81 ++-
- model_manager.ps1                    | 995 +++++++++++++++++++++++++++++++++++
- 9 files changed, 2430 insertions(+), 608 deletions(-)
+examples/server-mini/server-mini.cpp  ← --alias + /reset endpoint
+router/                               ← Rust router (src/main.rs, Cargo.toml)
+docs/WINDOWS-RUST-ROUTER.md           ← Router documentation
+docs/HANDOFF-WINDOWS-LLAMA-POC.md     ← This file (updated)
+docs/TROUBLESHOOTING-WINDOWS-LLAMA-RUNTIME.md  ← Updated with router info
+docs/LLAMA-SERVER-MINI-ALIAS-PATCH.md ← Updated with /reset endpoint
+README.md                             ← Rewritten with full topology
+LIBRARIAN_KNOWLEDGE.md                ← Updated with router context
 ```
 
 ---
@@ -130,21 +138,22 @@ Date:   Fri Jun 12 13:06:58 2026 -0400
 |------|--------|------------|
 | Embedding role non-functional | Cannot serve `/v1/embeddings` | Build full `llama-server.exe` or backport embedding handler |
 | No TLS/HTTPS | All API traffic plaintext | Use SSH tunnel or VPN |
-| No `--api-key` | Anyone on LAN can use the server | Firewall rule on port 9120 |
+| No `--api-key` | Anyone on LAN can use the server | Firewall rule on port 8080/9120 |
 | Console window visible | Minor UX annoyance | Start via scheduled task or system service |
 | Cold start ~90s | First load after driver update is slow | Warm cache reduces to ~6s |
+| Router is in-memory only | Session state lost on restart | Add SQLite persistence (planned) |
+| No context summarization | Old turns dropped, not summarized | Add rolling summary (planned) |
 
 ---
 
-## Next Recommended Step
+## Next Recommended Steps
 
-**Build and validate embedding support.** This is the single biggest gap:
-
-1. Either backport the `/v1/embeddings` handler to `server-mini.cpp` (~100 lines)
-2. Or cherry-pick the full `examples/server/` from a newer upstream commit
-3. Then verify `embed-start` → `POST /v1/embeddings` → valid vector response
-4. Update identity verification for the embedding role
+1. **Add SQLite persistence to router** — Survive restarts without losing session state
+2. **Add context summarization** — Replace dropped turns with rolling summaries instead of truncation
+3. **Add request size limits** — Prevent oversized prompts from overwhelming the server
+4. **Add CORS configuration** — Allow browser-based clients
+5. **Build Windows service wrapper** — Run router as a background service
 
 ---
 
-*See also: [`WINDOWS-LLAMA-MANAGER-HARDENING.md`](WINDOWS-LLAMA-MANAGER-HARDENING.md), [`LLAMA-SERVER-MINI-ALIAS-PATCH.md`](LLAMA-SERVER-MINI-ALIAS-PATCH.md), [`TROUBLESHOOTING-WINDOWS-LLAMA-RUNTIME.md`](TROUBLESHOOTING-WINDOWS-LLAMA-RUNTIME.md), [`LIBRARIAN-RUNTIME-CONTRACT.md`](LIBRARIAN-RUNTIME-CONTRACT.md)*
+*See also: [`WINDOWS-RUST-ROUTER.md`](WINDOWS-RUST-ROUTER.md), [`WINDOWS-LLAMA-MANAGER-HARDENING.md`](WINDOWS-LLAMA-MANAGER-HARDENING.md), [`LLAMA-SERVER-MINI-ALIAS-PATCH.md`](LLAMA-SERVER-MINI-ALIAS-PATCH.md), [`TROUBLESHOOTING-WINDOWS-LLAMA-RUNTIME.md`](TROUBLESHOOTING-WINDOWS-LLAMA-RUNTIME.md), [`LIBRARIAN-RUNTIME-CONTRACT.md`](LIBRARIAN-RUNTIME-CONTRACT.md)*
